@@ -3,8 +3,8 @@ require 'sinatra/base'
 module Sinatra
   class Application < Base
 
-    # we assume that the first file that requires 'sinatra' is the
-    # app_file. all other path related options are calculated based
+    # We assume that the first file that requires 'sinatra' is the
+    # app_file. All other path related options are calculated based
     # on this path by default.
     set :app_file, caller_files.first || $0
 
@@ -22,9 +22,9 @@ module Sinatra
     end
   end
 
-  at_exit { Application.run! if $!.nil? && Application.run? }
+  at_exit { Application.run! if $ERROR_INFO.nil? && Application.run? }
 end
 
-# include would include the module in Object
-# extend only extends the `main` object
+# include would include the module in Object whereas
+# extend only extends the `main` object.
 extend Sinatra::Delegator
