@@ -1,9 +1,6 @@
-*.log
-.DS_Store
-/dist
-/book
+# please add general patterns to your global ignore list
+# see https://github.com/github/gitignore#readme
+
+/pkg
 /doc/api
-/doc/*.html
-.#*
-\#*
-.emacs*
+/Gemfile.lock
