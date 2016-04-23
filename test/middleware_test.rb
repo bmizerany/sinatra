@@ -1,13 +1,15 @@
-require File.dirname(__FILE__) + '/helper'
+require File.expand_path('../helper', __FILE__)
 
-describe "Middleware" do
-  before do
-    @app = mock_app(Sinatra::Default) {
-      get '/*' do
-        response.headers['X-Tests'] = env['test.ran'].join(', ')
+class MiddlewareTest < Test::Unit::TestCase
+  setup do
+    @app = mock_app(Sinatra::Application) do
+      get('/*')do
+        response.headers['X-Tests'] = env['test.ran'].
+          map { |n| n.split('::').last }.
+          join(', ')
         env['PATH_INFO']
       end
-    }
+    end
   end
 
   class MockMiddleware < Struct.new(:app)
@@ -54,5 +56,13 @@ describe "Middleware" do
     get '/Foo'
     assert_equal '/foo', body
     assert_equal "UpcaseMiddleware, DowncaseMiddleware", response['X-Tests']
+  end
+
+  it "works when app is used as middleware" do
+    @app.use UpcaseMiddleware
+    @app = @app.new
+    get '/Foo'
+    assert_equal "/FOO", body
+    assert_equal "UpcaseMiddleware", response['X-Tests']
   end
 end

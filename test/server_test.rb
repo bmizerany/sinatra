@@ -1,30 +1,37 @@
-require File.dirname(__FILE__) + '/helper'
+require File.expand_path('../helper', __FILE__)
+require 'stringio'
 
-class Rack::Handler::Mock
-  extend Test::Unit::Assertions
+module Rack::Handler
+  class Mock
+    extend Test::Unit::Assertions
 
-  def self.run(app, options={})
-    assert(app < Sinatra::Base)
-    assert_equal 9001, options[:Port]
-    assert_equal 'foo.local', options[:Host]
-    yield new
+    def self.run(app, options={})
+      assert(app < Sinatra::Base)
+      assert_equal 9001, options[:Port]
+      assert_equal 'foo.local', options[:Host]
+      yield new
+    end
+
+    def stop
+    end
   end
 
-  def stop
-  end
+  register 'mock', 'Rack::Handler::Mock'
 end
 
-describe 'Sinatra::Base.run!' do
-  before do
-    mock_app {
+class ServerTest < Test::Unit::TestCase
+  setup do
+    mock_app do
       set :server, 'mock'
-      set :host, 'foo.local'
+      set :bind, 'foo.local'
       set :port, 9001
-    }
-    $stdout = File.open('/dev/null', 'wb')
+    end
+    $stderr = StringIO.new
   end
 
-  after { $stdout = STDOUT }
+  def teardown
+    $stderr = STDERR
+  end
 
   it "locates the appropriate Rack handler and calls ::run" do
     @app.run!

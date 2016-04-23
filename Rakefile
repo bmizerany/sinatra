@@ -1,135 +1,182 @@
 require 'rake/clean'
 require 'rake/testtask'
 require 'fileutils'
+require 'date'
+
+# CI Reporter is only needed for the CI
+begin
+  require 'ci/reporter/rake/test_unit'
+rescue LoadError
+end
 
 task :default => :test
 task :spec => :test
 
+CLEAN.include "**/*.rbc"
+
+def source_version
+  @source_version ||= begin
+    load './lib/sinatra/version.rb'
+    Sinatra::VERSION
+  end
+end
+
+def prev_feature
+  source_version.gsub(/^(\d\.)(\d+)\..*$/) { $1 + ($2.to_i - 1).to_s }
+end
+
+def prev_version
+  return prev_feature + '.0' if source_version.end_with? '.0'
+  source_version.gsub(/\d+$/) { |s| s.to_i - 1 }
+end
+
 # SPECS ===============================================================
+
+task :test do
+  ENV['LANG'] = 'C'
+  ENV.delete 'LC_CTYPE'
+end
 
 Rake::TestTask.new(:test) do |t|
   t.test_files = FileList['test/*_test.rb']
   t.ruby_opts = ['-rubygems'] if defined? Gem
+  t.ruby_opts << '-I.'
 end
 
-desc 'Run compatibility specs (requires test/spec)'
-task :compat do |t|
-  pattern = ENV['TEST'] || '.*'
-  sh "specrb --testcase '#{pattern}' -Ilib:test compat/*_test.rb"
+Rake::TestTask.new(:"test:core") do |t|
+  core_tests = %w[base delegator encoding extensions filter
+     helpers mapped_error middleware radius rdoc
+     readme request response result route_added_hook
+     routing server settings sinatra static templates]
+  t.test_files = core_tests.map {|n| "test/#{n}_test.rb"}
+  t.ruby_opts = ["-rubygems"] if defined? Gem
+  t.ruby_opts << "-I."
+end
+
+# Rcov ================================================================
+
+namespace :test do
+  desc 'Measures test coverage'
+  task :coverage do
+    rm_f "coverage"
+    sh "rcov -Ilib test/*_test.rb"
+  end
+end
+
+# Website =============================================================
+
+desc 'Generate RDoc under doc/api'
+task 'doc'     => ['doc:api']
+task('doc:api') { sh "yardoc -o doc/api" }
+CLEAN.include 'doc/api'
+
+# README ===============================================================
+
+task :add_template, [:name] do |t, args|
+  Dir.glob('README.*') do |file|
+    code = File.read(file)
+    if code =~ /^===.*#{args.name.capitalize}/
+      puts "Already covered in #{file}"
+    else
+      template = code[/===[^\n]*Liquid.*index\.liquid<\/tt>[^\n]*/m]
+      if !template
+        puts "Liquid not found in #{file}"
+      else
+        puts "Adding section to #{file}"
+        template = template.gsub(/Liquid/, args.name.capitalize).gsub(/liquid/, args.name.downcase)
+        code.gsub! /^(\s*===.*CoffeeScript)/, "\n" << template << "\n\\1"
+        File.open(file, "w") { |f| f << code }
+      end
+    end
+  end
+end
+
+# Thanks in announcement ===============================================
+
+team = ["Ryan Tomayko", "Blake Mizerany", "Simon Rozet", "Konstantin Haase"]
+desc "list of contributors"
+task :thanks, [:release,:backports] do |t, a|
+  a.with_defaults :release => "#{prev_version}..HEAD",
+    :backports => "#{prev_feature}.0..#{prev_feature}.x"
+  included = `git log --format=format:"%aN\t%s" #{a.release}`.lines.to_a
+  excluded = `git log --format=format:"%aN\t%s" #{a.backports}`.lines.to_a
+  commits  = (included - excluded).group_by { |c| c[/^[^\t]+/] }
+  authors  = commits.keys.sort_by { |n| - commits[n].size } - team
+  puts authors[0..-2].join(', ') << " and " << authors.last,
+    "(based on commits included in #{a.release}, but not in #{a.backports})"
+end
+
+desc "list of authors"
+task :authors, [:commit_range, :format, :sep] do |t, a|
+  a.with_defaults :format => "%s (%d)", :sep => ", ", :commit_range => '--all'
+  authors = Hash.new { |h,k| h[k] = 0 }
+  blake   = "Blake Mizerany"
+  overall = 0
+  mapping = {
+    "blake.mizerany@gmail.com" => blake, "bmizerany" => blake,
+    "a_user@mac.com" => blake, "ichverstehe" => "Harry Vangberg",
+    "Wu Jiang (nouse)" => "Wu Jiang" }
+  `git shortlog -s #{a.commit_range}`.lines.map do |line|
+    line = line.force_encoding 'binary' if line.respond_to? :force_encoding
+    num, name = line.split("\t", 2).map(&:strip)
+    authors[mapping[name] || name] += num.to_i
+    overall += num.to_i
+  end
+  puts "#{overall} commits by #{authors.count} authors:"
+  puts authors.sort_by { |n,c| -c }.map { |e| a.format % e }.join(a.sep)
 end
 
 # PACKAGING ============================================================
 
-# Load the gemspec using the same limitations as github
-def spec
-  @spec ||=
-    begin
-      require 'rubygems/specification'
-      data = File.read('sinatra.gemspec')
-      spec = nil
-      Thread.new { spec = eval("$SAFE = 3\n#{data}") }.join
-      spec
+if defined?(Gem)
+  # Load the gemspec using the same limitations as github
+  def spec
+    require 'rubygems' unless defined? Gem::Specification
+    @spec ||= eval(File.read('sinatra.gemspec'))
+  end
+
+  def package(ext='')
+    "pkg/sinatra-#{spec.version}" + ext
+  end
+
+  desc 'Build packages'
+  task :package => %w[.gem .tar.gz].map {|e| package(e)}
+
+  desc 'Build and install as local gem'
+  task :install => package('.gem') do
+    sh "gem install #{package('.gem')}"
+  end
+
+  directory 'pkg/'
+  CLOBBER.include('pkg')
+
+  file package('.gem') => %w[pkg/ sinatra.gemspec] + spec.files do |f|
+    sh "gem build sinatra.gemspec"
+    mv File.basename(f.name), f.name
+  end
+
+  file package('.tar.gz') => %w[pkg/] + spec.files do |f|
+    sh <<-SH
+      git archive \
+        --prefix=sinatra-#{source_version}/ \
+        --format=tar \
+        HEAD | gzip > #{f.name}
+    SH
+  end
+
+  task 'release' => ['test', package('.gem')] do
+    if File.read("CHANGES") =~ /= \d\.\d\.\d . not yet released$/i
+      fail 'please update changes first'
     end
-end
 
-def package(ext='')
-  "dist/sinatra-#{spec.version}" + ext
-end
-
-desc 'Build packages'
-task :package => %w[.gem .tar.gz].map {|e| package(e)}
-
-desc 'Build and install as local gem'
-task :install => package('.gem') do
-  sh "gem install #{package('.gem')}"
-end
-
-directory 'dist/'
-
-file package('.gem') => %w[dist/ sinatra.gemspec] + spec.files do |f|
-  sh "gem build sinatra.gemspec"
-  mv File.basename(f.name), f.name
-end
-
-file package('.tar.gz') => %w[dist/] + spec.files do |f|
-  sh <<-SH
-    git archive \
-      --prefix=sinatra-#{source_version}/ \
-      --format=tar \
-      HEAD | gzip > #{f.name}
-  SH
-end
-
-# Rubyforge Release / Publish Tasks ==================================
-
-desc 'Publish gem and tarball to rubyforge'
-task 'publish:gem' => [package('.gem'), package('.tar.gz')] do |t|
-  sh <<-end
-    rubyforge add_release sinatra sinatra #{spec.version} #{package('.gem')} &&
-    rubyforge add_file    sinatra sinatra #{spec.version} #{package('.tar.gz')}
+    sh <<-SH
+      gem install #{package('.gem')} --local &&
+      gem push #{package('.gem')}  &&
+      git commit --allow-empty -a -m '#{source_version} release'  &&
+      git tag -s v#{source_version} -m '#{source_version} release'  &&
+      git tag -s #{source_version} -m '#{source_version} release'  &&
+      git push && (git push sinatra || true) &&
+      git push --tags && (git push sinatra --tags || true)
+    SH
   end
-end
-
-# Website ============================================================
-# Building docs requires HAML and the hanna gem:
-#   gem install mislav-hanna --source=http://gems.github.com
-
-task 'doc'     => ['doc:api']
-
-desc 'Generate Hanna RDoc under doc/api'
-task 'doc:api' => ['doc/api/index.html']
-
-file 'doc/api/index.html' => FileList['lib/**/*.rb','README.rdoc'] do |f|
-  rb_files = f.prerequisites
-  sh((<<-end).gsub(/\s+/, ' '))
-    hanna --charset utf8 \
-          --fmt html \
-          --inline-source \
-          --line-numbers \
-          --main README.rdoc \
-          --op doc/api \
-          --title 'Sinatra API Documentation' \
-          #{rb_files.join(' ')}
-  end
-end
-CLEAN.include 'doc/api'
-
-def rdoc_to_html(file_name)
-  require 'rdoc/markup/to_html'
-  rdoc = RDoc::Markup::ToHtml.new
-  rdoc.convert(File.read(file_name))
-end
-
-# Gemspec Helpers ====================================================
-
-def source_version
-  line = File.read('lib/sinatra/base.rb')[/^\s*VERSION = .*/]
-  line.match(/.*VERSION = '(.*)'/)[1]
-end
-
-project_files =
-  FileList[
-    '{lib,test,compat,images}/**',
-    'Rakefile', 'CHANGES', 'README.rdoc'
-  ]
-file 'sinatra.gemspec' => project_files do |f|
-  # read spec file and split out manifest section
-  spec = File.read(f.name)
-  head, manifest, tail = spec.split("  # = MANIFEST =\n")
-  # replace version and date
-  head.sub!(/\.version = '.*'/, ".version = '#{source_version}'")
-  head.sub!(/\.date = '.*'/, ".date = '#{Date.today.to_s}'")
-  # determine file list from git ls-files
-  files = `git ls-files`.
-    split("\n").
-    sort.
-    reject{ |file| file =~ /^\./ }.
-    reject { |file| file =~ /^doc/ }.
-    map{ |file| "    #{file}" }.
-    join("\n")
-  # piece file back together and write...
-  manifest = "  s.files = %w[\n#{files}\n  ]\n"
-  spec = [head,manifest,tail].join("  # = MANIFEST =\n")
-  File.open(f.name, 'w') { |io| io.write(spec) }
-  puts "updated #{f.name}"
 end
